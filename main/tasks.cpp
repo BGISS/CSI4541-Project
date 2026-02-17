@@ -1,6 +1,7 @@
 #include "tasks.h"
+#include "communication.h"
 #include <DHT11.h>
-#include<Wire.h>
+#include <Wire.h>
 
 //Sensor threads
 TaskHandle_t DHT11Handle = NULL;
@@ -15,9 +16,12 @@ int16_t AcX,AcY,AcZ,Tmp,GyX,GyY,GyZ;
 static const int DHT_SENSOR_PIN = 18;
 DHT_nonblocking dht_sensor( DHT_SENSOR_PIN, DHT_SENSOR_TYPE );
 
+//Struc for wifi communication
+SensorData currentData;
+
 void CreateAllTasks() {
   // Create tasks and store handles
-  xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 1, &DHT11Handle, 0);
+  xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 1, &DHT11Handle, 1);
 
   Wire.begin(21,22);
   Wire.beginTransmission(MPU_addr);
@@ -36,27 +40,21 @@ void DHT11Task(void *pvParameters){
   for(;;){
     if( dht_sensor.measure( &temperature, &humidity ) == true )
     {
-      Serial.print( "T = " );
-      Serial.print( temperature, 1 );
-      Serial.print( " deg. C, H = " );
-      Serial.print( humidity, 1 );
-      Serial.println( "%" );
+      // Serial.print( "T = " );
+      // Serial.print( temperature, 1 );
+      // Serial.print( " deg. C, H = " );
+      // Serial.print( humidity, 1 );
+      // Serial.println( "%" );
+
+      currentData.temperature = temperature;
+      currentData.humidity = humidity;
+      currentData.timestamp = millis();
+      updateSensorData(currentData);
     }
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }
 
-//DHT11 Helper
-// static bool measure_environment( float *temperature, float *humidity )
-// {
-//   if(  )
-//   {
-//     return( true );
-//   }
-  
-
-//   return( false );
-// }
 
 void MPU6050Task(void *pvParameters){
   
@@ -72,13 +70,13 @@ void MPU6050Task(void *pvParameters){
     GyX=Wire.read()<<8|Wire.read();  // 0x43 (GYRO_XOUT_H) & 0x44 (GYRO_XOUT_L)
     GyY=Wire.read()<<8|Wire.read();  // 0x45 (GYRO_YOUT_H) & 0x46 (GYRO_YOUT_L)
     GyZ=Wire.read()<<8|Wire.read();  // 0x47 (GYRO_ZOUT_H) & 0x48 (GYRO_ZOUT_L)
-    Serial.print("AcX = "); Serial.print(AcX);
-    Serial.print(" | AcY = "); Serial.print(AcY);
-    Serial.print(" | AcZ = "); Serial.print(AcZ);
-    Serial.print(" | Tmp = "); Serial.print(Tmp/340.00+36.53);  //From the datasheet of MPU6050, we can know the temperature formula
-    Serial.print(" | GyX = "); Serial.print(GyX);
-    Serial.print(" | GyY = "); Serial.print(GyY);
-    Serial.print(" | GyZ = "); Serial.println(GyZ);
+    // Serial.print("AcX = "); Serial.print(AcX);
+    // Serial.print(" | AcY = "); Serial.print(AcY);
+    // Serial.print(" | AcZ = "); Serial.print(AcZ);
+    // Serial.print(" | Tmp = "); Serial.print(Tmp/340.00+36.53);  //From the datasheet of MPU6050, we can know the temperature formula
+    // Serial.print(" | GyX = "); Serial.print(GyX);
+    // Serial.print(" | GyY = "); Serial.print(GyY);
+    // Serial.print(" | GyZ = "); Serial.println(GyZ);
     
     delay(1000);
   }
