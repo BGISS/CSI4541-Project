@@ -5,6 +5,10 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <Preferences.h>
+#include "freertos/semphr.h"
+
+//Semaphore
+static SemaphoreHandle_t dataMutex = NULL;
 
 // BLE UUIDs
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -14,7 +18,10 @@
 
 // Server + shared data
 WebServer server(80);
-static SensorData latestData;
+static AmbientTempData latestAmbientTemp;
+static PositionData latestPosition;
+static HeartData latestHeart;
+static HumanTempData latestHumanTemp;
 Preferences preferences;
 
 static String wifiSSID = "";
@@ -34,11 +41,9 @@ class CredentialsCallbacks: public BLECharacteristicCallbacks {
         
         if (uuid == SSID_CHAR_UUID) {
             wifiSSID = String(value.c_str());
-            Serial.println("SSID received: " + wifiSSID);
         } 
         else if (uuid == PASSWORD_CHAR_UUID) {
             wifiPassword = String(value.c_str());
-            Serial.println("Password received");
             
             // Both credentials received, try to connect
             if (wifiSSID.length() > 0 && wifiPassword.length() > 0) {
@@ -49,32 +54,30 @@ class CredentialsCallbacks: public BLECharacteristicCallbacks {
 };
 
 void Communication_init() {
+    dataMutex = xSemaphoreCreateMutex(); 
     // Load saved credentials from flash
     preferences.begin("wifi", false);
+    preferences.clear();
+    // preferences.end();
     wifiSSID = preferences.getString("ssid", "");
     wifiPassword = preferences.getString("password", "");
     preferences.end();
     
     // If we have saved credentials, try to connect
     if (wifiSSID.length() > 0) {
-        Serial.println("Trying saved credentials...");
         initWiFi();
         
         // If connection fails, start BLE
         if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("Saved credentials failed, starting BLE...");
             initBLE();
         }
     } else {
         // No saved credentials, start BLE
-        Serial.println("No saved credentials, starting BLE...");
         initBLE();
     }
 }
 
-static void initBLE() {
-    Serial.println("Starting BLE provisioning...");
-    
+static void initBLE() {    
     BLEDevice::init("ESP32-Setup");
     BLEServer *pServer = BLEDevice::createServer();
     BLEService *pService = pServer->createService(SERVICE_UUID);
@@ -106,12 +109,9 @@ static void initBLE() {
     pAdvertising->addServiceUUID(SERVICE_UUID);
     pAdvertising->setScanResponse(true);
     pAdvertising->start();
-    
-    Serial.println("BLE advertising started. Connect with phone app.");
 }
 
 static void initWiFi() {
-    Serial.println("Connecting to WiFi...");
     WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
     
     int attempts = 0;
@@ -154,36 +154,74 @@ static void initWiFi() {
     }
 }
 
-void updateSensorData(SensorData data) {
-    latestData = data;
+void updateAmbientTempData(AmbientTempData data) { 
+     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        latestAmbientTemp = data;
+        xSemaphoreGive(dataMutex);
+    } 
+}
+void updatePositionData(PositionData data) { 
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        latestPosition = data;
+        xSemaphoreGive(dataMutex);
+    } 
+}
+void updateHeartData(HeartData data) { 
+     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        latestHeart = data;
+        xSemaphoreGive(dataMutex);
+    } 
+}
+void updateHumanTempData(HumanTempData data){  
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        latestHumanTemp = data;
+        xSemaphoreGive(dataMutex);
+    } 
 }
 
 static void handleDataRequest() {
-    String json = "{";
-    json += "\"temperature\":" + String(latestData.temperature, 2) + ",";
-    json += "\"humidity\":" + String(latestData.humidity, 2);
-    json += "}";
+   AmbientTempData ambientCopy;
+   PositionData    positionCopy;
+   HeartData       heartCopy;
+   HumanTempData   humanTempCopy;
 
+    // Snapshot all data under the mutex so the web server
+    // can't read while a task is mid-write
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        ambientCopy    = latestAmbientTemp;
+        positionCopy   = latestPosition;
+        heartCopy      = latestHeart;
+        humanTempCopy  = latestHumanTemp;
+        xSemaphoreGive(dataMutex);
+    }
+
+    char json[180];
+    snprintf(json, sizeof(json),
+        "{"
+            "\"ambientTemp\":%.2f,\"humidity\":%.2f,"
+            "\"acX\":%.2f,\"acY\":%.2f,\"acZ\":%.2f,"
+            "\"sp02\":%.2f,\"heartBeat\":%.2f,"
+            "\"humanTemp\":%.2f"
+        "}",
+        ambientCopy.temperature, ambientCopy.humidity,
+        positionCopy.AcX, positionCopy.AcY, positionCopy.AcZ,
+        heartCopy.sp02, heartCopy.heartBeat,
+        humanTempCopy.temperature
+    );
+
+    server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(200, "application/json", json);
-    Serial.println("HTTP -> " + json);
 }
 
 static void handleRoot() {
-    String html = "<!DOCTYPE html><html><body style='font-family: Arial;'>";
-    html += "<h1>ESP32 Sensor Data</h1>";
-    html += "<p>Temperature: " + String(latestData.temperature, 1) + " °C</p>";
-    html += "<p>Humidity: " + String(latestData.humidity, 1) + " %</p>";
-    html += "<p><a href='/data'>Get JSON</a></p>";
-    html += "</body></html>";
-
-    server.send(200, "text/html", html);
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(200, "text/plain", "ESP32 OK"); 
 }
 
 void handleClient() {
     // Check if we received credentials via BLE
     if (credentialsReceived) {
         credentialsReceived = false;
-        Serial.println("Attempting WiFi connection...");
         if (statusCharacteristic != nullptr) {
             statusCharacteristic->setValue("connecting");
             statusCharacteristic->notify();

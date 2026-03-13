@@ -2,10 +2,14 @@
 #include "communication.h"
 #include <DHT11.h>
 #include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+#include "spo2_algorithm.h"
 
 //Sensor threads
 TaskHandle_t DHT11Handle = NULL;
 TaskHandle_t MPU6050Handle = NULL;
+TaskHandle_t MAX30102Handle = NULL;
 
 //MPU6050 Params
 const int MPU_addr=0x68;  // I2C address of the MPU-6050
@@ -16,19 +20,40 @@ int16_t AcX,AcY,AcZ,Tmp,GyX,GyY,GyZ;
 static const int DHT_SENSOR_PIN = 18;
 DHT_nonblocking dht_sensor( DHT_SENSOR_PIN, DHT_SENSOR_TYPE );
 
-//Struc for wifi communication
-SensorData currentData;
+//MAX30102 Params
+MAX30105 particleSensor;
+#define SPO2_BUFFER_LENGTH 100
+uint32_t irBuffer[SPO2_BUFFER_LENGTH];
+uint32_t redBuffer[SPO2_BUFFER_LENGTH];
+int32_t  spo2Value;
+int8_t   spo2Valid;
+int32_t  heartRateValue;
+int8_t   hrValid;
+
+//Strucs for wifi communication
+AmbientTempData currentAmbientTemp;
+PositionData    currentPosition;
+HeartData       currentHeart;
 
 void CreateAllTasks() {
   // Create tasks and store handles
-  xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 1, &DHT11Handle, 1);
-
+  xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 1, &DHT11Handle, 0);
   Wire.begin(21,22);
   Wire.beginTransmission(MPU_addr);
-  Wire.write(0x6B);  // PWR_MGMT_1 register
+  Wire.write(0x6B);  
   Wire.write(0);     // set to zero (wakes up the MPU-6050)
   Wire.endTransmission(true);
-  xTaskCreatePinnedToCore(MPU6050Task, "MPU6050", 4096, NULL, 1, &MPU6050Handle, 1);
+  xTaskCreatePinnedToCore(MPU6050Task, "MPU6050", 4096, NULL, 1, &MPU6050Handle, 0);
+
+  if (particleSensor.begin(Wire, I2C_SPEED_FAST) == false) {
+      Serial.println("MAX30102 not found. Check wiring.");
+    } else {
+        particleSensor.setup(60, 4, 2, 100, 411, 4096);
+        //Changing the amplitude helps to adjust accuracy of the sensor
+        particleSensor.setPulseAmplitudeRed(0x1F);
+        particleSensor.setPulseAmplitudeIR(0x1F);
+    }
+  xTaskCreatePinnedToCore(MAX30102Task, "MAX30102", 16384, NULL, 1, &MAX30102Handle, 0);
 }
 
 void DHT11Task(void *pvParameters){
@@ -40,16 +65,10 @@ void DHT11Task(void *pvParameters){
   for(;;){
     if( dht_sensor.measure( &temperature, &humidity ) == true )
     {
-      // Serial.print( "T = " );
-      // Serial.print( temperature, 1 );
-      // Serial.print( " deg. C, H = " );
-      // Serial.print( humidity, 1 );
-      // Serial.println( "%" );
 
-      currentData.temperature = temperature;
-      currentData.humidity = humidity;
-      currentData.timestamp = millis();
-      updateSensorData(currentData);
+      currentAmbientTemp.temperature = temperature;
+      currentAmbientTemp.humidity    = humidity;
+       updateAmbientTempData(currentAmbientTemp);
     }
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
@@ -77,8 +96,79 @@ void MPU6050Task(void *pvParameters){
     // Serial.print(" | GyX = "); Serial.print(GyX);
     // Serial.print(" | GyY = "); Serial.print(GyY);
     // Serial.print(" | GyZ = "); Serial.println(GyZ);
-    
-    delay(1000);
+    currentPosition.AcX = AcX;
+    currentPosition.AcY = AcY;
+    currentPosition.AcZ = AcZ;
+    updatePositionData(currentPosition);
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
+void MAX30102Task(void *pvParameters){
+    const byte RATE_SIZE = 8;
+    byte rates[RATE_SIZE];
+    byte rateSpot = 0;
+    long lastBeat = 0;
+    float beatsPerMinute;
+    int beatAvg = 0;
+
+    for (;;) {
+        particleSensor.check();
+        
+        if (!particleSensor.available()) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+
+        long irValue  = particleSensor.getIR();
+        long redValue = particleSensor.getRed();
+        particleSensor.nextSample();
+
+        if (irValue < 50000) {
+            Serial.println("No finger detected");
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
+        // Heart rate using beat detection
+        if (checkForBeat(irValue)) {
+            long delta = millis() - lastBeat;
+            lastBeat = millis();
+            beatsPerMinute = 60.0 / (delta / 1000.0);
+
+            if (beatsPerMinute > 20 && beatsPerMinute < 200) {
+                rates[rateSpot++] = (byte)beatsPerMinute;
+                rateSpot %= RATE_SIZE;
+
+                beatAvg = 0;
+                for (byte x = 0; x < RATE_SIZE; x++)
+                    beatAvg += rates[x];
+                beatAvg /= RATE_SIZE;
+            }
+        }
+
+        // SpO2 using rolling average of R ratio
+        static float redAC = 0, irAC = 0;
+        static float redDC = 0, irDC = 0;
+        redDC = 0.95 * redDC + 0.05 * redValue;
+        irDC  = 0.95 * irDC  + 0.05 * irValue;
+        redAC = redValue - redDC;
+        irAC  = irValue  - irDC;
+
+        static float R = 0;
+        if (irAC != 0){
+          R = 0.99 * R + 0.01 * ((redAC / redDC) / (irAC / irDC));
+        }
+        int spo2 = 104 - 17 * R;
+        spo2 = constrain(spo2, 80, 100);
+        currentHeart.heartBeat = beatAvg;
+        currentHeart.sp02 = spo2;
+        updateHeartData(currentHeart);
+        Serial.print("HR: ");   
+        Serial.print(beatAvg);
+        Serial.print(" BPM, SpO2: "); 
+        Serial.print(spo2);
+        Serial.println("%");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
