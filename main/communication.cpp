@@ -6,6 +6,8 @@
 #include <BLEUtils.h>
 #include <Preferences.h>
 #include "freertos/semphr.h"
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 //Semaphore
 static SemaphoreHandle_t dataMutex = NULL;
@@ -16,8 +18,6 @@ static SemaphoreHandle_t dataMutex = NULL;
 #define PASSWORD_CHAR_UUID  "1c95d5e3-d8f7-413a-bf3d-7a2e5d7be87e"
 #define STATUS_CHAR_UUID    "d4e1f4f0-8c7e-4f4c-b4d4-3f4e8c7d6a5b"
 
-// Server + shared data
-WebServer server(80);
 static AmbientTempData latestAmbientTemp;
 static PositionData latestPosition;
 static HeartData latestHeart;
@@ -31,8 +31,7 @@ static BLECharacteristic* statusCharacteristic = nullptr;
 
 static void initBLE();
 static void initWiFi();
-static void handleDataRequest();
-static void handleRoot();
+void postData(void* pvParameters);
 
 class CredentialsCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
@@ -58,11 +57,11 @@ void Communication_init() {
     // Load saved credentials from flash
     preferences.begin("wifi", false);
     preferences.clear();
-    // preferences.end();
     wifiSSID = preferences.getString("ssid", "");
     wifiPassword = preferences.getString("password", "");
     preferences.end();
-    
+    // wifiSSID = "That Zazaaa";
+    // wifiPassword = "thegriddy69";
     // If we have saved credentials, try to connect
     if (wifiSSID.length() > 0) {
         initWiFi();
@@ -81,7 +80,6 @@ static void initBLE() {
     BLEDevice::init("ESP32-Setup");
     BLEServer *pServer = BLEDevice::createServer();
     BLEService *pService = pServer->createService(SERVICE_UUID);
-    
     // SSID characteristic
     BLECharacteristic *pSSIDChar = pService->createCharacteristic(
         SSID_CHAR_UUID,
@@ -113,13 +111,12 @@ static void initBLE() {
 
 static void initWiFi() {
     WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
-    
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 20) {
         delay(500);
         attempts++;
     }
-    
+
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\nWiFi connected!");
         Serial.print("IP: ");
@@ -139,12 +136,7 @@ static void initWiFi() {
         
         // Stop BLE to save resources
         BLEDevice::deinit(false);
-        
-        // Start web server
-        server.on("/", handleRoot);
-        server.on("/data", handleDataRequest);
-        server.begin();
-        Serial.println("HTTP server started");
+        xTaskCreate(postData, "postData", 8192, NULL, 1, NULL);
     } else {
         Serial.println("\nWiFi connection failed!");
         if (statusCharacteristic != nullptr) {
@@ -179,43 +171,45 @@ void updateHumanTempData(HumanTempData data){
     } 
 }
 
-static void handleDataRequest() {
-   AmbientTempData ambientCopy;
-   PositionData    positionCopy;
-   HeartData       heartCopy;
-   HumanTempData   humanTempCopy;
+void postData(void* pvParameters) {
+   for (;;) {
+        if (WiFi.status() == WL_CONNECTED) {
+            AmbientTempData ambientCopy;
+            PositionData    positionCopy;
+            HeartData       heartCopy;
+            HumanTempData   humanTempCopy;
 
-    // Snapshot all data under the mutex so the web server
-    // can't read while a task is mid-write
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        ambientCopy    = latestAmbientTemp;
-        positionCopy   = latestPosition;
-        heartCopy      = latestHeart;
-        humanTempCopy  = latestHumanTemp;
-        xSemaphoreGive(dataMutex);
+            if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                ambientCopy   = latestAmbientTemp;
+                positionCopy  = latestPosition;
+                heartCopy     = latestHeart;
+                humanTempCopy = latestHumanTemp;
+                xSemaphoreGive(dataMutex);
+                char json[180];
+                snprintf(json, sizeof(json),
+                    "{"
+                        "\"ambientTemp\":%.2f,\"humidity\":%.2f,"
+                        "\"acX\":%.2f,\"acY\":%.2f,\"acZ\":%.2f,"
+                        "\"spO2\":%.2f,\"heartBeat\":%.2f,"
+                        "\"humanTemp\":%.2f"
+                    "}",
+                    ambientCopy.temperature, ambientCopy.humidity,
+                    positionCopy.AcX, positionCopy.AcY, positionCopy.AcZ,
+                    heartCopy.spO2, heartCopy.heartBeat,
+                    humanTempCopy.temperature
+                );
+                HTTPClient http;
+                WiFiClientSecure client;
+                client.setInsecure();
+                http.begin(client,"https://healthmonitoringdashboard.onrender.com/data");
+                http.addHeader("Content-Type", "application/json");
+                int httpCode = http.POST(json);
+                // Serial.println(httpCode);       
+                http.end();
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(3000));
     }
-
-    char json[180];
-    snprintf(json, sizeof(json),
-        "{"
-            "\"ambientTemp\":%.2f,\"humidity\":%.2f,"
-            "\"acX\":%.2f,\"acY\":%.2f,\"acZ\":%.2f,"
-            "\"sp02\":%.2f,\"heartBeat\":%.2f,"
-            "\"humanTemp\":%.2f"
-        "}",
-        ambientCopy.temperature, ambientCopy.humidity,
-        positionCopy.AcX, positionCopy.AcY, positionCopy.AcZ,
-        heartCopy.sp02, heartCopy.heartBeat,
-        humanTempCopy.temperature
-    );
-
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(200, "application/json", json);
-}
-
-static void handleRoot() {
-    server.sendHeader("Access-Control-Allow-Origin", "*");
-    server.send(200, "text/plain", "ESP32 OK"); 
 }
 
 void handleClient() {
@@ -228,6 +222,4 @@ void handleClient() {
         }
         initWiFi();
     }
-    
-    server.handleClient();
 }

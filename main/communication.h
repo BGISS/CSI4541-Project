@@ -12,7 +12,7 @@ struct PositionData{
     float AcZ;
 };
 struct HeartData{
-    float sp02;
+    float spO2;
     float heartBeat;
 };
 struct HumanTempData{
@@ -24,7 +24,8 @@ void Communication_init();
 void updatePositionData(PositionData);
 void updateHeartData(HeartData);
 void updateAmbientTempData(AmbientTempData);
-void updateHumanTempData(PositionData);
+void updateHumanTempData(HumanTempData);
+void postData(void* pvParameters);
 void handleClient();
 
 #endif

@@ -5,11 +5,14 @@
 #include "MAX30105.h"
 #include "heartRate.h"
 #include "spo2_algorithm.h"
+#include <Adafruit_MLX90614.h>
 
 //Sensor threads
 TaskHandle_t DHT11Handle = NULL;
 TaskHandle_t MPU6050Handle = NULL;
 TaskHandle_t MAX30102Handle = NULL;
+TaskHandle_t MAX30205Handle = NULL;
+TaskHandle_t MLX90614Handle = NULL;
 
 //MPU6050 Params
 const int MPU_addr=0x68;  // I2C address of the MPU-6050
@@ -30,20 +33,30 @@ int8_t   spo2Valid;
 int32_t  heartRateValue;
 int8_t   hrValid;
 
+// MLX90614 Params
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+
 //Strucs for wifi communication
 AmbientTempData currentAmbientTemp;
 PositionData    currentPosition;
 HeartData       currentHeart;
+HumanTempData currentHuman;
 
 void CreateAllTasks() {
   // Create tasks and store handles
-  xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 1, &DHT11Handle, 0);
+  xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 1, &DHT11Handle, 1);
   Wire.begin(21,22);
+  if (!mlx.begin(0x5A, &Wire)) {
+    Serial.println("MLX90614 not found. Check wiring.");
+  } else {
+    Serial.println("MLX90614 ready.");
+  }
   Wire.beginTransmission(MPU_addr);
   Wire.write(0x6B);  
   Wire.write(0);     // set to zero (wakes up the MPU-6050)
   Wire.endTransmission(true);
-  xTaskCreatePinnedToCore(MPU6050Task, "MPU6050", 4096, NULL, 1, &MPU6050Handle, 0);
+  xTaskCreatePinnedToCore(MPU6050Task, "MPU6050", 4096, NULL, 1, &MPU6050Handle, 1);
+  xTaskCreatePinnedToCore(MLX90614Task, "MLX90614", 4096, NULL, 1, &MLX90614Handle, 1);
 
   if (particleSensor.begin(Wire, I2C_SPEED_FAST) == false) {
       Serial.println("MAX30102 not found. Check wiring.");
@@ -53,22 +66,20 @@ void CreateAllTasks() {
         particleSensor.setPulseAmplitudeRed(0x1F);
         particleSensor.setPulseAmplitudeIR(0x1F);
     }
-  xTaskCreatePinnedToCore(MAX30102Task, "MAX30102", 16384, NULL, 1, &MAX30102Handle, 0);
+  xTaskCreatePinnedToCore(MAX30102Task, "MAX30102", 16384, NULL, 1, &MAX30102Handle, 1);
 }
 
 void DHT11Task(void *pvParameters){
   float temperature;
   float humidity;
-
   /* Measure temperature and humidity.  If the functions returns
      true, then a measurement is available. */
   for(;;){
     if( dht_sensor.measure( &temperature, &humidity ) == true )
     {
-
       currentAmbientTemp.temperature = temperature;
-      currentAmbientTemp.humidity    = humidity;
-       updateAmbientTempData(currentAmbientTemp);
+      currentAmbientTemp.humidity = humidity;
+      updateAmbientTempData(currentAmbientTemp);
     }
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
@@ -162,13 +173,36 @@ void MAX30102Task(void *pvParameters){
         int spo2 = 104 - 17 * R;
         spo2 = constrain(spo2, 80, 100);
         currentHeart.heartBeat = beatAvg;
-        currentHeart.sp02 = spo2;
+        currentHeart.spO2 = spo2;
         updateHeartData(currentHeart);
         Serial.print("HR: ");   
         Serial.print(beatAvg);
         Serial.print(" BPM, SpO2: "); 
         Serial.print(spo2);
         Serial.println("%");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+ 
+void MLX90614Task(void *pvParameters) {
+    for (;;) {
+        // float tempC = -999.0f;
+        // tempC = mlx.readObjectTempC();        
+        // if (!isnan(tempC) && tempC > 0.0f && tempC < 100.0f) {
+        //     currentHuman.temperature = tempC;
+        //     updateHumanTempData(currentHuman);
+        //     Serial.print("IR Body Temp: ");
+        //     Serial.print(tempC, 2);
+        //     Serial.println(" °C");
+        // } else {
+        //     Serial.println("MLX90614 read error");
+        //     Serial.println(tempC); 
+        // }
+        float obj  = mlx.readObjectTempC();
+        float amb  = mlx.readAmbientTempC();
+        Serial.print("obj: "); Serial.print(obj);
+        Serial.print("  amb: "); Serial.println(amb);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
