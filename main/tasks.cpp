@@ -12,7 +12,6 @@ TaskHandle_t DHT11Handle = NULL;
 TaskHandle_t MPU6050Handle = NULL;
 TaskHandle_t MAX30102Handle = NULL;
 TaskHandle_t MAX30205Handle = NULL;
-TaskHandle_t MLX90614Handle = NULL;
 
 //MPU6050 Params
 const int MPU_addr=0x68;  // I2C address of the MPU-6050
@@ -33,8 +32,8 @@ int8_t   spo2Valid;
 int32_t  heartRateValue;
 int8_t   hrValid;
 
-// MLX90614 Params
-Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+// MAX30205 Params
+uint8_t MAX30205_ADDRESS = 0x00;
 
 //Strucs for wifi communication
 AmbientTempData currentAmbientTemp;
@@ -42,21 +41,23 @@ PositionData    currentPosition;
 HeartData       currentHeart;
 HumanTempData currentHuman;
 
+//Semaphore for I2C
+SemaphoreHandle_t wireMutex = NULL;
+
 void CreateAllTasks() {
+  wireMutex = xSemaphoreCreateMutex();
   // Create tasks and store handles
-  xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 1, &DHT11Handle, 1);
   Wire.begin(21,22);
-  if (!mlx.begin(0x5A, &Wire)) {
-    Serial.println("MLX90614 not found. Check wiring.");
-  } else {
-    Serial.println("MLX90614 ready.");
-  }
+  findMAX30205();
   Wire.beginTransmission(MPU_addr);
   Wire.write(0x6B);  
   Wire.write(0);     // set to zero (wakes up the MPU-6050)
   Wire.endTransmission(true);
-  xTaskCreatePinnedToCore(MPU6050Task, "MPU6050", 4096, NULL, 1, &MPU6050Handle, 1);
-  xTaskCreatePinnedToCore(MLX90614Task, "MLX90614", 4096, NULL, 1, &MLX90614Handle, 1);
+Wire.beginTransmission(MAX30205_ADDRESS);
+Wire.write(0x01);   // configuration register
+Wire.write(0x00);   // normal operation, continuous conversion
+Wire.endTransmission(true);
+  
 
   if (particleSensor.begin(Wire, I2C_SPEED_FAST) == false) {
       Serial.println("MAX30102 not found. Check wiring.");
@@ -66,6 +67,10 @@ void CreateAllTasks() {
         particleSensor.setPulseAmplitudeRed(0x1F);
         particleSensor.setPulseAmplitudeIR(0x1F);
     }
+  Wire.setClock(100000);
+  xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 1, &DHT11Handle, 1);
+  xTaskCreatePinnedToCore(MPU6050Task, "MPU6050", 4096, NULL, 1, &MPU6050Handle, 1);
+  xTaskCreatePinnedToCore(MAX30205Task, "MAX30205", 4096, NULL, 1, &MAX30205Handle, 1);
   xTaskCreatePinnedToCore(MAX30102Task, "MAX30102", 16384, NULL, 1, &MAX30102Handle, 1);
 }
 
@@ -89,57 +94,68 @@ void DHT11Task(void *pvParameters){
 void MPU6050Task(void *pvParameters){
   
   for(;;){
-    Wire.beginTransmission(MPU_addr);
-    Wire.write(0x3B);  // starting with register 0x3B (ACCEL_XOUT_H)
-    Wire.endTransmission(false);
-    Wire.requestFrom(MPU_addr,14,true);  // request a total of 14 registers
-    AcX=Wire.read()<<8|Wire.read();  // 0x3B (ACCEL_XOUT_H) & 0x3C (ACCEL_XOUT_L)    
-    AcY=Wire.read()<<8|Wire.read();  // 0x3D (ACCEL_YOUT_H) & 0x3E (ACCEL_YOUT_L)
-    AcZ=Wire.read()<<8|Wire.read();  // 0x3F (ACCEL_ZOUT_H) & 0x40 (ACCEL_ZOUT_L)
-    Tmp=Wire.read()<<8|Wire.read();  // 0x41 (TEMP_OUT_H) & 0x42 (TEMP_OUT_L)
-    GyX=Wire.read()<<8|Wire.read();  // 0x43 (GYRO_XOUT_H) & 0x44 (GYRO_XOUT_L)
-    GyY=Wire.read()<<8|Wire.read();  // 0x45 (GYRO_YOUT_H) & 0x46 (GYRO_YOUT_L)
-    GyZ=Wire.read()<<8|Wire.read();  // 0x47 (GYRO_ZOUT_H) & 0x48 (GYRO_ZOUT_L)
-    // Serial.print("AcX = "); Serial.print(AcX);
-    // Serial.print(" | AcY = "); Serial.print(AcY);
-    // Serial.print(" | AcZ = "); Serial.print(AcZ);
-    // Serial.print(" | Tmp = "); Serial.print(Tmp/340.00+36.53);  //From the datasheet of MPU6050, we can know the temperature formula
-    // Serial.print(" | GyX = "); Serial.print(GyX);
-    // Serial.print(" | GyY = "); Serial.print(GyY);
-    // Serial.print(" | GyZ = "); Serial.println(GyZ);
-    currentPosition.AcX = AcX;
-    currentPosition.AcY = AcY;
-    currentPosition.AcZ = AcZ;
-    updatePositionData(currentPosition);
+    if (xSemaphoreTake(wireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      Wire.beginTransmission(MPU_addr);
+      Wire.write(0x3B);  // starting with register 0x3B (ACCEL_XOUT_H)
+      Wire.endTransmission(false);
+      Wire.requestFrom(MPU_addr,14,true);  // request a total of 14 registers
+      AcX=Wire.read()<<8|Wire.read();  // 0x3B (ACCEL_XOUT_H) & 0x3C (ACCEL_XOUT_L)    
+      AcY=Wire.read()<<8|Wire.read();  // 0x3D (ACCEL_YOUT_H) & 0x3E (ACCEL_YOUT_L)
+      AcZ=Wire.read()<<8|Wire.read();  // 0x3F (ACCEL_ZOUT_H) & 0x40 (ACCEL_ZOUT_L)
+      Tmp=Wire.read()<<8|Wire.read();  // 0x41 (TEMP_OUT_H) & 0x42 (TEMP_OUT_L)
+      GyX=Wire.read()<<8|Wire.read();  // 0x43 (GYRO_XOUT_H) & 0x44 (GYRO_XOUT_L)
+      GyY=Wire.read()<<8|Wire.read();  // 0x45 (GYRO_YOUT_H) & 0x46 (GYRO_YOUT_L)
+      GyZ=Wire.read()<<8|Wire.read();  // 0x47 (GYRO_ZOUT_H) & 0x48 (GYRO_ZOUT_L)
+      // Serial.print("AcX = "); Serial.print(AcX);
+      // Serial.print(" | AcY = "); Serial.print(AcY);
+      // Serial.print(" | AcZ = "); Serial.print(AcZ);
+      // Serial.print(" | Tmp = "); Serial.print(Tmp/340.00+36.53);  //From the datasheet of MPU6050, we can know the temperature formula
+      // Serial.print(" | GyX = "); Serial.print(GyX);
+      // Serial.print(" | GyY = "); Serial.print(GyY);
+      // Serial.print(" | GyZ = "); Serial.println(GyZ);
+      currentPosition.AcX = AcX;
+      currentPosition.AcY = AcY;
+      currentPosition.AcZ = AcZ;
+      updatePositionData(currentPosition);
+      xSemaphoreGive(wireMutex);
+    }
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
 void MAX30102Task(void *pvParameters){
     const byte RATE_SIZE = 8;
-    byte rates[RATE_SIZE];
+    byte rates[RATE_SIZE] = {0};
     byte rateSpot = 0;
     long lastBeat = 0;
     float beatsPerMinute;
     int beatAvg = 0;
 
     for (;;) {
-        particleSensor.check();
+      bool sampleReady = false;
+      long irValue  = 0;
+      long redValue = 0;
+    if (xSemaphoreTake(wireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+
+      particleSensor.check();
         
-        if (!particleSensor.available()) {
-            vTaskDelay(pdMS_TO_TICKS(5));
-            continue;
-        }
-
-        long irValue  = particleSensor.getIR();
-        long redValue = particleSensor.getRed();
+      if (particleSensor.available()) {
+        irValue    = particleSensor.getIR();
+        redValue   = particleSensor.getRed();
         particleSensor.nextSample();
-
-        if (irValue < 50000) {
-            Serial.println("No finger detected");
-            vTaskDelay(pdMS_TO_TICKS(500));
-            continue;
-        }
+        sampleReady = true;
+      }
+      xSemaphoreGive(wireMutex);
+    }
+    if (!sampleReady) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+    if (irValue < 50000) {
+        Serial.println("No finger detected");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        continue;
+    }
 
         // Heart rate using beat detection
         if (checkForBeat(irValue)) {
@@ -184,25 +200,72 @@ void MAX30102Task(void *pvParameters){
     }
 }
 
- 
-void MLX90614Task(void *pvParameters) {
-    for (;;) {
-        // float tempC = -999.0f;
-        // tempC = mlx.readObjectTempC();        
-        // if (!isnan(tempC) && tempC > 0.0f && tempC < 100.0f) {
-        //     currentHuman.temperature = tempC;
-        //     updateHumanTempData(currentHuman);
-        //     Serial.print("IR Body Temp: ");
-        //     Serial.print(tempC, 2);
-        //     Serial.println(" °C");
-        // } else {
-        //     Serial.println("MLX90614 read error");
-        //     Serial.println(tempC); 
-        // }
-        float obj  = mlx.readObjectTempC();
-        float amb  = mlx.readAmbientTempC();
-        Serial.print("obj: "); Serial.print(obj);
-        Serial.print("  amb: "); Serial.println(amb);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+float readTemperature() {
+  Wire.beginTransmission(MAX30205_ADDRESS);
+  Wire.write(0x00);
+  Wire.endTransmission(false);  
+  uint8_t bytesReceived = Wire.requestFrom((uint8_t)MAX30205_ADDRESS, (uint8_t)2);
+  if (bytesReceived != 2) {
+    Serial.printf("MAX30205 expected 2 bytes, got %d\n", bytesReceived);
+    return -1;
+  }
+
+  uint8_t msb = Wire.read();
+  uint8_t lsb = Wire.read();
+
+  int16_t raw = ((int16_t)msb << 8) | lsb;
+  // raw >>= 7;  
+
+  return raw / 256.0f;
 }
+
+void findMAX30205() {
+  for (uint8_t addr = 0x48; addr <= 0x4F; addr++) {  
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      MAX30205_ADDRESS = addr;
+      Serial.printf("MAX30205 found at 0x%02X\n", addr);
+      return;
+    }
+  }
+  Serial.println("MAX30205 not found!");
+}
+void MAX30205Task(void *pvParameters){
+   for (;;) {
+    float temperature = -1;
+
+    if (xSemaphoreTake(wireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      temperature = readTemperature();
+      xSemaphoreGive(wireMutex);
+    }
+
+    if (temperature != -1) {
+      Serial.print("Temperature: ");
+      Serial.print(temperature);
+      Serial.println(" °C");
+      currentHuman.temperature = temperature;
+      updateHumanTempData(currentHuman);
+    } else {
+      Serial.println("MAX30205 read failed.");
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+ 
+// void MLX90614Task(void *pvParameters) {
+//     for (;;) {
+//       float obj;
+//       float amb;
+//         if (xSemaphoreTake(wireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+//           obj  = mlx.readObjectTempC();
+//           amb  = mlx.readAmbientTempC();
+//           xSemaphoreGive(wireMutex);
+//         }
+//         Serial.print("obj: "); Serial.print(obj);
+//         Serial.print("  amb: "); Serial.println(amb);
+//         currentHuman.temperature = obj;
+//         updateHumanTempData(currentHuman);
+//         vTaskDelay(pdMS_TO_TICKS(1000));
+//     }
+// }

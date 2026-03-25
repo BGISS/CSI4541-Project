@@ -31,7 +31,8 @@ static BLECharacteristic* statusCharacteristic = nullptr;
 
 static void initBLE();
 static void initWiFi();
-void postData(void* pvParameters);
+
+TaskHandle_t postDataHandle = NULL;
 
 class CredentialsCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
@@ -60,8 +61,7 @@ void Communication_init() {
     wifiSSID = preferences.getString("ssid", "");
     wifiPassword = preferences.getString("password", "");
     preferences.end();
-    // wifiSSID = "That Zazaaa";
-    // wifiPassword = "thegriddy69";
+    
     // If we have saved credentials, try to connect
     if (wifiSSID.length() > 0) {
         initWiFi();
@@ -94,7 +94,6 @@ static void initBLE() {
     );
     pPasswordChar->setCallbacks(new CredentialsCallbacks());
     
-    // Status characteristic (optional - for feedback to phone)
     statusCharacteristic = pService->createCharacteristic(
         STATUS_CHAR_UUID,
         BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
@@ -136,7 +135,10 @@ static void initWiFi() {
         
         // Stop BLE to save resources
         BLEDevice::deinit(false);
-        xTaskCreate(postData, "postData", 8192, NULL, 1, NULL);
+        
+        if (postDataHandle == NULL) {
+            xTaskCreatePinnedToCore(postData, "postData", 8192, NULL, 1, &postDataHandle, 0);
+        }
     } else {
         Serial.println("\nWiFi connection failed!");
         if (statusCharacteristic != nullptr) {
@@ -147,24 +149,28 @@ static void initWiFi() {
 }
 
 void updateAmbientTempData(AmbientTempData data) { 
-     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (dataMutex == NULL) return;
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         latestAmbientTemp = data;
         xSemaphoreGive(dataMutex);
     } 
 }
-void updatePositionData(PositionData data) { 
+void updatePositionData(PositionData data) {
+    if (dataMutex == NULL) return; 
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         latestPosition = data;
         xSemaphoreGive(dataMutex);
     } 
 }
 void updateHeartData(HeartData data) { 
-     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (dataMutex == NULL) return;
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         latestHeart = data;
         xSemaphoreGive(dataMutex);
     } 
 }
-void updateHumanTempData(HumanTempData data){  
+void updateHumanTempData(HumanTempData data){ 
+    if (dataMutex == NULL) return; 
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         latestHumanTemp = data;
         xSemaphoreGive(dataMutex);
@@ -185,7 +191,7 @@ void postData(void* pvParameters) {
                 heartCopy     = latestHeart;
                 humanTempCopy = latestHumanTemp;
                 xSemaphoreGive(dataMutex);
-                char json[180];
+                char json[256];
                 snprintf(json, sizeof(json),
                     "{"
                         "\"ambientTemp\":%.2f,\"humidity\":%.2f,"
@@ -204,7 +210,6 @@ void postData(void* pvParameters) {
                 http.begin(client,"https://healthmonitoringdashboard.onrender.com/data");
                 http.addHeader("Content-Type", "application/json");
                 int httpCode = http.POST(json);
-                // Serial.println(httpCode);       
                 http.end();
             }
         }

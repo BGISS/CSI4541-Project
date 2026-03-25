@@ -5,6 +5,8 @@ void DHT11Task(void *pvParameters);
 void MPU6050Task(void *pvParameters);
 void MAX30102Task(void *pvParameters);
 void MLX90614Task(void *pvParameters);
+void MAX30205Task(void *pvParameters);
+void findMAX30205();
 void CreateAllTasks();
 
 #endif
