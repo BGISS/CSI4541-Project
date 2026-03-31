@@ -1,6 +1,5 @@
 #include "communication.h"
 #include <WiFi.h>
-#include <WebServer.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -57,7 +56,7 @@ void Communication_init() {
     dataMutex = xSemaphoreCreateMutex(); 
     // Load saved credentials from flash
     preferences.begin("wifi", false);
-    preferences.clear();
+    // preferences.clear();
     wifiSSID = preferences.getString("ssid", "");
     wifiPassword = preferences.getString("password", "");
     preferences.end();
@@ -177,6 +176,22 @@ void updateHumanTempData(HumanTempData data){
     } 
 }
 
+static void reconnectWiFi() {
+    Serial.println("WiFi lost — attempting reconnect...");
+    WiFi.disconnect();
+    WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        delay(500);
+        attempts++;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("WiFi reconnected.");
+    } else {
+        Serial.println("WiFi reconnect failed.");
+    }
+}
+
 void postData(void* pvParameters) {
    for (;;) {
         if (WiFi.status() == WL_CONNECTED) {
@@ -210,6 +225,7 @@ void postData(void* pvParameters) {
                 http.begin(client,"https://healthmonitoringdashboard.onrender.com/data");
                 http.addHeader("Content-Type", "application/json");
                 int httpCode = http.POST(json);
+                Serial.print(httpCode);
                 http.end();
             }
         }

@@ -10,6 +10,7 @@ struct PositionData{
     float AcX;
     float AcY;
     float AcZ;
+    float magnitude;
 };
 struct HeartData{
     float spO2;
