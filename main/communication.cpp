@@ -36,8 +36,12 @@ TaskHandle_t postDataHandle = NULL;
 class CredentialsCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
         String value = pCharacteristic->getValue();
-        String uuid = pCharacteristic->getUUID().toString().c_str();
-        
+        value.trim();  // IMPORTANT
+        String uuid = String(pCharacteristic->getUUID().toString().c_str());
+        Serial.print("Received UUID: ");
+        Serial.println(uuid);
+        Serial.print("Value: ");
+        Serial.println(value);
         if (uuid == SSID_CHAR_UUID) {
             wifiSSID = String(value.c_str());
         } 
@@ -56,9 +60,10 @@ void Communication_init() {
     dataMutex = xSemaphoreCreateMutex(); 
     // Load saved credentials from flash
     preferences.begin("wifi", false);
-    // preferences.clear();
-    wifiSSID = preferences.getString("ssid", "");
-    wifiPassword = preferences.getString("password", "");
+    // wifiSSID = preferences.getString("ssid", "");
+    // wifiPassword = preferences.getString("password", "");
+    wifiSSID = "That Zazaaa";
+    wifiPassword = "thegriddy69";
     preferences.end();
     
     // If we have saved credentials, try to connect
@@ -112,6 +117,7 @@ static void initWiFi() {
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 20) {
         delay(500);
+          Serial.println(WiFi.status());
         attempts++;
     }
 
@@ -133,7 +139,7 @@ static void initWiFi() {
         }
         
         // Stop BLE to save resources
-        BLEDevice::deinit(false);
+        BLEDevice::deinit(true);
         
         if (postDataHandle == NULL) {
             xTaskCreatePinnedToCore(postData, "postData", 8192, NULL, 1, &postDataHandle, 0);
@@ -225,7 +231,7 @@ void postData(void* pvParameters) {
                 http.begin(client,"https://healthmonitoringdashboard.onrender.com/data");
                 http.addHeader("Content-Type", "application/json");
                 int httpCode = http.POST(json);
-                Serial.print(httpCode);
+                // Serial.print(httpCode);
                 http.end();
             }
         }

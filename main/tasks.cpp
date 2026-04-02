@@ -6,10 +6,12 @@
 #include "heartRate.h"
 #include "spo2_algorithm.h"
 #include <Adafruit_MLX90614.h>
+#include <Arduino.h>
+#include "pitches.h"
 
 //Thresholds
 #define MAX_BODY_TEMP 38
-#define MIN_BODY_TEMP 36
+#define MIN_BODY_TEMP 33
 #define MAX_HEARTBEAT 200
 #define MIN_HEARTBEAT 60
 
@@ -18,10 +20,11 @@ TaskHandle_t DHT11Handle = NULL;
 TaskHandle_t MPU6050Handle = NULL;
 TaskHandle_t MAX30102Handle = NULL;
 TaskHandle_t MAX30205Handle = NULL;
+TaskHandle_t MLX90614Handle = NULL;
 
 //Buzzer
-int buzzer = 35;
-int buzzingTime = 1;
+int buzzer = 26;
+int buzzingTime = 100;
 
 //MPU6050 Params
 const int MPU_addr=0x68;  // I2C address of the MPU-6050
@@ -29,7 +32,7 @@ int16_t AcX,AcY,AcZ,Tmp,GyX,GyY,GyZ;
 
 //DHT11 Params
 #define DHT_SENSOR_TYPE DHT_TYPE_11
-static const int DHT_SENSOR_PIN = 33;
+static const int DHT_SENSOR_PIN = 25;
 DHT_nonblocking dht_sensor( DHT_SENSOR_PIN, DHT_SENSOR_TYPE );
 
 //MAX30102 Params
@@ -38,8 +41,8 @@ MAX30105 particleSensor;
 static uint32_t irBuffer [SPO2_BUFFER_LENGTH];
 static uint32_t redBuffer[SPO2_BUFFER_LENGTH];
 
-// MAX30205 Params
-uint8_t MAX30205_ADDRESS = 0x00;
+// MLX90614 Params
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
 
 //Strucs for wifi communication
 AmbientTempData currentAmbientTemp;
@@ -51,41 +54,44 @@ HumanTempData currentHuman;
 SemaphoreHandle_t wireMutex = NULL;
 
 void CreateAllTasks() {
+
+  // ledcAttachPin(buzzer, 0);
+  // ledcSetup(0, 3000, 8); // 3kHz
+
   wireMutex = xSemaphoreCreateMutex();
   // Create tasks and store handles
   Wire.begin(21,22);
-
-  findMAX30205();
-
+  pinMode(buzzer,OUTPUT);
   Wire.beginTransmission(MPU_addr);
   Wire.write(0x6B);  
   Wire.write(0);     
   Wire.endTransmission(true);
 
-// Configure MAX30205 for normal continuous conversion
-  Wire.beginTransmission(MAX30205_ADDRESS);
-  Wire.write(0x01);  
-  Wire.write(0x00);  
-  Wire.endTransmission(true);
-  
+  // Initialize MLX90614
+  if (!mlx.begin()) {
+    Serial.println("Error connecting to MLX90614 sensor. Check wiring.");
+  } else {
+    Serial.print("MLX90614 Emissivity = "); 
+    Serial.println(mlx.readEmissivity());
+    Serial.println("MLX90614 initialized successfully");
+  }
 
   if (particleSensor.begin(Wire, I2C_SPEED_FAST) == false) {
       Serial.println("MAX30102 not found. Check wiring.");
     } else {
-        particleSensor.setup(60, 4, 2, 100, 411, 4096);
-        //Changing the amplitude helps to adjust accuracy of the sensor
-        particleSensor.setPulseAmplitudeRed(0x1F);
-        particleSensor.setPulseAmplitudeIR(0x1F);
+        particleSensor.setup(100, 4, 2, 100, 411, 4096);
     }
   Wire.setClock(100000);
 
   xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 2, &DHT11Handle, 1);
   xTaskCreatePinnedToCore(MPU6050Task, "MPU6050", 4096, NULL, 2, &MPU6050Handle, 1);
-  xTaskCreatePinnedToCore(MAX30205Task, "MAX30205", 4096, NULL, 2, &MAX30205Handle, 1);
   xTaskCreatePinnedToCore(MAX30102Task, "MAX30102", 16384, NULL, 2, &MAX30102Handle, 1);
+  xTaskCreatePinnedToCore(MLX90614Task, "MLX90614", 4096, NULL, 2, &MLX90614Handle, 1);  
+
 }
 
 void DHT11Task(void *pvParameters){
+  Serial.println("DHT11 Started");
   float temperature;
   float humidity;
   /* Measure temperature and humidity.  If the functions returns
@@ -96,8 +102,13 @@ void DHT11Task(void *pvParameters){
       currentAmbientTemp.temperature = temperature;
       currentAmbientTemp.humidity = humidity;
       updateAmbientTempData(currentAmbientTemp);
+      Serial.print("DHT11: Got reading - Temp: ");
+      Serial.print(temperature);
+      Serial.print("°C, Humidity: ");
+      Serial.print(humidity);
+      Serial.println("%");
     }
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    vTaskDelay(pdMS_TO_TICKS(500));
   }
 }
 
@@ -116,9 +127,9 @@ void MPU6050Task(void *pvParameters){
       for (int i = 0; i < 8; i++) Wire.read();
 
       xSemaphoreGive(wireMutex);
-      currentPosition.AcX = AcX / 16384.0;
-      currentPosition.AcY = AcY / 16384.0;
-      currentPosition.AcZ = AcZ / 16384.0;
+      currentPosition.AcX = (AcX / 16384.0) * 9.81;
+      currentPosition.AcY = (AcY / 16384.0) * 9.81;
+      currentPosition.AcZ = (AcZ / 16384.0) * 9.81;
       updatePositionData(currentPosition);
      
     }
@@ -230,80 +241,37 @@ void MAX30102Task(void *pvParameters){
     }
 }
 
-float readTemperature() {
-  Wire.beginTransmission(MAX30205_ADDRESS);
-  Wire.write(0x00);
-  Wire.endTransmission(false);  
-  uint8_t bytesReceived = Wire.requestFrom((uint8_t)MAX30205_ADDRESS, (uint8_t)2);
-  if (bytesReceived != 2) {
-    Serial.printf("MAX30205 expected 2 bytes, got %d\n", bytesReceived);
-    return -1;
-  }
-
-  uint8_t msb = Wire.read();
-  uint8_t lsb = Wire.read();
-
-  int16_t raw = (int16_t)((msb << 8) | lsb);
-  // raw >>= 7;  
-
-  return raw / 256.0f;
-}
-
-void findMAX30205() {
-  for (uint8_t addr = 0x48; addr <= 0x4F; addr++) {  
-    Wire.beginTransmission(addr);
-    if (Wire.endTransmission() == 0) {
-      MAX30205_ADDRESS = addr;
-      Serial.printf("MAX30205 found at 0x%02X\n", addr);
-      return;
-    }
-  }
-  Serial.println("MAX30205 not found!");
-}
-void MAX30205Task(void *pvParameters){
-   for (;;) {
-    float temperature = -1;
-
-    if (xSemaphoreTake(wireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      temperature = readTemperature();
-      xSemaphoreGive(wireMutex);
-    }
-
-    if (temperature > 0) {
-      Serial.print("Temperature: ");
-      Serial.print(temperature);
-      Serial.println(" °C");
-      currentHuman.temperature = temperature;
-      updateHumanTempData(currentHuman);
-      if (temperature < MIN_BODY_TEMP || temperature > MAX_BODY_TEMP){
-        // startBuzzer();
+void MLX90614Task(void *pvParameters) {
+    for (;;) {
+      float obj;
+      float amb;
+      
+      if (xSemaphoreTake(wireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        obj = mlx.readObjectTempC();
+        amb = mlx.readAmbientTempC();
+        xSemaphoreGive(wireMutex);
       }
-    } else {
-      Serial.println("MAX30205 read failed.");
+      
+      Serial.print("MLX90614 - Ambient: "); 
+      Serial.print(amb);
+      Serial.print("°C\tObject: "); 
+      Serial.print(obj); 
+      Serial.println("°C");
+      
+      currentHuman.temperature = obj;
+      updateHumanTempData(currentHuman);
+      
+      if (obj < MIN_BODY_TEMP || obj > MAX_BODY_TEMP) {
+        startBuzzer();
+      }
+      
+      vTaskDelay(pdMS_TO_TICKS(5000));
     }
-
-    vTaskDelay(pdMS_TO_TICKS(1000));
-  }
 }
  
 void startBuzzer(){
-  digitalWrite(buzzer, HIGH);
-  vTaskDelay(pdMS_TO_TICKS(buzzingTime));
-  digitalWrite(buzzer, LOW);
+  tone(18, NOTE_C5, 3000);
+     
+  // restart after two seconds 
+  delay(2000);
 }
-// void MLX90614Task(void *pvParameters) {
-//     for (;;) {
-//       float obj;
-//       float amb;
-//         if (xSemaphoreTake(wireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-//           obj  = mlx.readObjectTempC();
-//           amb  = mlx.readAmbientTempC();
-//           xSemaphoreGive(wireMutex);
-//         }
-//         Serial.print("obj: "); Serial.print(obj);
-//         Serial.print("  amb: "); Serial.println(amb);
-//         currentHuman.temperature = obj;
-//         updateHumanTempData(currentHuman);
-//         vTaskDelay(pdMS_TO_TICKS(1000));
-//     }
-// }
