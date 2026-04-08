@@ -8,12 +8,13 @@
 #include <Adafruit_MLX90614.h>
 #include <Arduino.h>
 #include "pitches.h"
-
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 //Thresholds
-#define MAX_BODY_TEMP 38
-#define MIN_BODY_TEMP 33
-#define MAX_HEARTBEAT 200
-#define MIN_HEARTBEAT 60
+volatile float MAX_BODY_TEMP_VAL = 38.0;
+volatile float MIN_BODY_TEMP_VAL = 33.0;
+volatile int   MAX_HEARTBEAT_VAL = 200;
+volatile int   MIN_HEARTBEAT_VAL = 60;
 
 //Sensor threads
 TaskHandle_t DHT11Handle = NULL;
@@ -52,12 +53,43 @@ HumanTempData currentHuman;
 
 //Semaphore for I2C
 SemaphoreHandle_t wireMutex = NULL;
+#include <Wire.h>
+
+#define SDA_PIN 21  // change to your pins
+#define SCL_PIN 22
+
+void recoverI2C() {
+  pinMode(SDA_PIN, OUTPUT);
+  pinMode(SCL_PIN, OUTPUT);
+  
+  digitalWrite(SDA_PIN, HIGH);
+  delay(10);
+
+  // Toggle SCL 9 times to unstick SDA
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(SCL_PIN, LOW);
+    delayMicroseconds(10);
+    digitalWrite(SCL_PIN, HIGH);
+    delayMicroseconds(10);
+  }
+
+  // Send STOP condition
+  digitalWrite(SDA_PIN, LOW);
+  delayMicroseconds(10);
+  digitalWrite(SCL_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(SDA_PIN, HIGH);
+  delayMicroseconds(10);
+
+  // Now hand control back to Wire
+  Wire.begin(SDA_PIN, SCL_PIN, 100000);  // 100kHz
+}
 
 void CreateAllTasks() {
 
   // ledcAttachPin(buzzer, 0);
   // ledcSetup(0, 3000, 8); // 3kHz
-
+  recoverI2C();
   wireMutex = xSemaphoreCreateMutex();
   // Create tasks and store handles
   Wire.begin(21,22);
@@ -79,14 +111,17 @@ void CreateAllTasks() {
   if (particleSensor.begin(Wire, I2C_SPEED_FAST) == false) {
       Serial.println("MAX30102 not found. Check wiring.");
     } else {
-        particleSensor.setup(100, 4, 2, 100, 411, 4096);
+        particleSensor.setup();
+        particleSensor.setPulseAmplitudeRed(0x0A);
     }
-  Wire.setClock(100000);
+    Wire.setClock(100000);
+
 
   xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 2, &DHT11Handle, 1);
   xTaskCreatePinnedToCore(MPU6050Task, "MPU6050", 4096, NULL, 2, &MPU6050Handle, 1);
   xTaskCreatePinnedToCore(MAX30102Task, "MAX30102", 16384, NULL, 2, &MAX30102Handle, 1);
-  xTaskCreatePinnedToCore(MLX90614Task, "MLX90614", 4096, NULL, 2, &MLX90614Handle, 1);  
+  xTaskCreatePinnedToCore(MLX90614Task, "MLX90614", 4096, NULL, 2, &MLX90614Handle, 1);
+  xTaskCreatePinnedToCore(ThresholdSyncTask, "ThresholdSync", 8192, NULL, 1, NULL, 0);  
 
 }
 
@@ -169,7 +204,7 @@ void MAX30102Task(void *pvParameters){
       continue;
     }
     if (irValue < 50000) {
-        Serial.println("No finger detected");
+        // Serial.println("No finger detected");
          bufferIndex  = 0;
          bufferReady = false;
          bufferFull = false;
@@ -189,7 +224,7 @@ void MAX30102Task(void *pvParameters){
             long delta = millis() - lastBeat;
             lastBeat = millis();
             if (delta > 0) {
-                beatsPerMinute = 60.0f / (delta / 1000.0f);
+                beatsPerMinute = 60 / (delta / 1000.0);
             }
 
             if (beatsPerMinute > 20 && beatsPerMinute < 255) {
@@ -228,16 +263,16 @@ void MAX30102Task(void *pvParameters){
         currentHeart.spO2 = spo2;
         updateHeartData(currentHeart);
         if(beatAvg > 0){
-          if(beatAvg < MIN_HEARTBEAT || beatAvg > MAX_HEARTBEAT){
+          if(beatAvg > 0 && (beatAvg < MIN_HEARTBEAT_VAL || beatAvg > MAX_HEARTBEAT_VAL)){
             // startBuzzer();
           }
         }
-        Serial.print("HR: ");   
-        Serial.print(beatAvg);
-        Serial.print(" BPM, SpO2: "); 
-        Serial.print(spo2);
-        Serial.println("%");
-        vTaskDelay(pdMS_TO_TICKS(20));
+        // Serial.print("HR: ");   
+        // Serial.print(beatAvg);
+        // Serial.print(" BPM, SpO2: "); 
+        // Serial.print(spo2);
+        // Serial.println("%");
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
 
@@ -261,8 +296,8 @@ void MLX90614Task(void *pvParameters) {
       currentHuman.temperature = obj;
       updateHumanTempData(currentHuman);
       
-      if (obj < MIN_BODY_TEMP || obj > MAX_BODY_TEMP) {
-        startBuzzer();
+      if (obj < MIN_BODY_TEMP_VAL || obj > MAX_BODY_TEMP_VAL) {
+        // startBuzzer();
       }
       
       vTaskDelay(pdMS_TO_TICKS(5000));
@@ -274,4 +309,30 @@ void startBuzzer(){
      
   // restart after two seconds 
   delay(2000);
+}
+
+void ThresholdSyncTask(void *pvParameters) {
+  for (;;) {
+    HTTPClient http;
+    http.begin("https://healthmonitoringdashboard.onrender.com/thresholds");
+    int code = http.GET();
+
+    if (code == 200) {
+      String body = http.getString();
+      StaticJsonDocument<512> doc;
+      if (deserializeJson(doc, body) == DeserializationError::Ok) {
+        if (doc["bodyTemp"]["max"].is<float>())
+          MAX_BODY_TEMP_VAL = doc["bodyTemp"]["max"].as<float>();
+        if (doc["bodyTemp"]["min"].is<float>())
+          MIN_BODY_TEMP_VAL = doc["bodyTemp"]["min"].as<float>();
+        if (doc["heartRate"]["max"].is<int>())
+          MAX_HEARTBEAT_VAL = doc["heartRate"]["max"].as<int>();
+        if (doc["heartRate"]["min"].is<int>())
+          MIN_HEARTBEAT_VAL = doc["heartRate"]["min"].as<int>();
+      }
+    }
+    http.end();
+
+    vTaskDelay(pdMS_TO_TICKS(4000)); 
+  }
 }
