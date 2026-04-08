@@ -27,6 +27,7 @@ void updateHeartData(HeartData);
 void updateAmbientTempData(AmbientTempData);
 void updateHumanTempData(HumanTempData);
 void postData(void* pvParameters);
+void ThresholdSyncTask(void* pvParameters);
 void handleClient();
 
 #endif

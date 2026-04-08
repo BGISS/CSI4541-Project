@@ -7,9 +7,18 @@
 #include "freertos/semphr.h"
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include "globals.h"
 
 //Semaphore
 static SemaphoreHandle_t dataMutex = NULL;
+SemaphoreHandle_t httpMutex;
+
+//Thresholds
+volatile float MAX_BODY_TEMP_VAL = 38.0;
+volatile float MIN_BODY_TEMP_VAL = 33.0;
+volatile int   MAX_HEARTBEAT_VAL = 200;
+volatile int   MIN_HEARTBEAT_VAL = 60;
 
 // BLE UUIDs
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -32,6 +41,7 @@ static void initBLE();
 static void initWiFi();
 
 TaskHandle_t postDataHandle = NULL;
+TaskHandle_t ThresholdSyncHandle = NULL;
 
 class CredentialsCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
@@ -58,6 +68,7 @@ class CredentialsCallbacks: public BLECharacteristicCallbacks {
 
 void Communication_init() {
     dataMutex = xSemaphoreCreateMutex(); 
+    httpMutex = xSemaphoreCreateMutex();
     // Load saved credentials from flash
     preferences.begin("wifi", false);
     // wifiSSID = preferences.getString("ssid", "");
@@ -144,6 +155,10 @@ static void initWiFi() {
         if (postDataHandle == NULL) {
             xTaskCreatePinnedToCore(postData, "postData", 8192, NULL, 1, &postDataHandle, 0);
         }
+        if (ThresholdSyncHandle == NULL) {
+            xTaskCreatePinnedToCore(ThresholdSyncTask, "ThresholdSync", 8192, NULL, 2, &ThresholdSyncHandle, 0);  
+        }
+
     } else {
         Serial.println("\nWiFi connection failed!");
         if (statusCharacteristic != nullptr) {
@@ -225,18 +240,51 @@ void postData(void* pvParameters) {
                     heartCopy.spO2, heartCopy.heartBeat,
                     humanTempCopy.temperature
                 );
-                HTTPClient http;
-                WiFiClientSecure client;
-                client.setInsecure();
-                http.begin(client,"https://healthmonitoringdashboard.onrender.com/data");
-                http.addHeader("Content-Type", "application/json");
-                int httpCode = http.POST(json);
-                // Serial.print(httpCode);
-                http.end();
+                if (xSemaphoreTake(httpMutex, portMAX_DELAY)){
+
+                    HTTPClient http;
+                    WiFiClientSecure client;
+                    client.setInsecure();
+                    http.begin(client,"https://healthmonitoringdashboard.onrender.com/data");
+                    http.addHeader("Content-Type", "application/json");
+                    int httpCode = http.POST(json);
+                    http.end();
+                 xSemaphoreGive(httpMutex);
+                 }
             }
         }
         vTaskDelay(pdMS_TO_TICKS(3000));
     }
+}
+
+void ThresholdSyncTask(void *pvParameters) {
+  for (;;) {
+    if(xSemaphoreTake(httpMutex, portMAX_DELAY)){
+
+        HTTPClient http;
+        http.setTimeout(5000);
+        http.setConnectTimeout(3000); 
+        http.begin("https://healthmonitoringdashboard.onrender.com/thresholds");
+        int code = http.GET();
+        if (code == 200) {
+        String body = http.getString();
+        StaticJsonDocument<512> doc;
+        if (deserializeJson(doc, body) == DeserializationError::Ok) {
+            if (doc["bodyTemp"]["max"].is<float>())
+            MAX_BODY_TEMP_VAL = doc["bodyTemp"]["max"].as<float>();
+            if (doc["bodyTemp"]["min"].is<float>())
+            MIN_BODY_TEMP_VAL = doc["bodyTemp"]["min"].as<float>();
+            if (doc["heartRate"]["max"].is<int>())
+            MAX_HEARTBEAT_VAL = doc["heartRate"]["max"].as<int>();
+            if (doc["heartRate"]["min"].is<int>())
+            MIN_HEARTBEAT_VAL = doc["heartRate"]["min"].as<int>();
+        }
+        }
+        http.end();
+        xSemaphoreGive(httpMutex);
+    }
+    vTaskDelay(pdMS_TO_TICKS(4000)); 
+  }
 }
 
 void handleClient() {
