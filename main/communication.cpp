@@ -10,6 +10,8 @@
 
 //Semaphore
 static SemaphoreHandle_t dataMutex = NULL;
+SemaphoreHandle_t httpMutex = NULL;
+
 
 // BLE UUIDs
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -30,7 +32,6 @@ static BLECharacteristic* statusCharacteristic = nullptr;
 
 static void initBLE();
 static void initWiFi();
-
 TaskHandle_t postDataHandle = NULL;
 
 class CredentialsCallbacks: public BLECharacteristicCallbacks {
@@ -51,19 +52,22 @@ class CredentialsCallbacks: public BLECharacteristicCallbacks {
             // Both credentials received, try to connect
             if (wifiSSID.length() > 0 && wifiPassword.length() > 0) {
                 credentialsReceived = true;
+                Serial.printf("Credentials set — SSID: '%s' Pass len: %d\n",
+                       wifiSSID.c_str(), wifiPassword.length());
             }
         }
     }
 };
 
 void Communication_init() {
-    dataMutex = xSemaphoreCreateMutex(); 
+    dataMutex = xSemaphoreCreateMutex();
+    httpMutex = xSemaphoreCreateMutex();
     // Load saved credentials from flash
     preferences.begin("wifi", false);
-    // wifiSSID = preferences.getString("ssid", "");
-    // wifiPassword = preferences.getString("password", "");
-    wifiSSID = "That Zazaaa";
-    wifiPassword = "thegriddy69";
+    // preferences.clear();
+    wifiSSID = preferences.getString("ssid", "");
+    wifiPassword = preferences.getString("password", "");
+    
     preferences.end();
     
     // If we have saved credentials, try to connect
@@ -113,9 +117,18 @@ static void initBLE() {
 }
 
 static void initWiFi() {
+     BLEDevice::deinit(true);
+    delay(500);
+    
+    WiFi.mode(WIFI_STA);  // explicitly set mode
+    delay(100);
+        Serial.printf("Attempting WiFi with SSID: '%s' (len:%d) Pass: '%s' (len:%d)\n",wifiSSID.c_str(), wifiSSID.length(),
+        wifiPassword.c_str(), wifiPassword.length());
     WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
+ 
+    
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    while (WiFi.status() != WL_CONNECTED && attempts < 40) {
         delay(500);
           Serial.println(WiFi.status());
         attempts++;
@@ -142,7 +155,7 @@ static void initWiFi() {
         BLEDevice::deinit(true);
         
         if (postDataHandle == NULL) {
-            xTaskCreatePinnedToCore(postData, "postData", 8192, NULL, 1, &postDataHandle, 0);
+            xTaskCreatePinnedToCore(postData, "postData", 16384, NULL, 1, &postDataHandle, 0);
         }
     } else {
         Serial.println("\nWiFi connection failed!");
@@ -225,6 +238,7 @@ void postData(void* pvParameters) {
                     heartCopy.spO2, heartCopy.heartBeat,
                     humanTempCopy.temperature
                 );
+                if (xSemaphoreTake(httpMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
                 HTTPClient http;
                 WiFiClientSecure client;
                 client.setInsecure();
@@ -233,6 +247,8 @@ void postData(void* pvParameters) {
                 int httpCode = http.POST(json);
                 // Serial.print(httpCode);
                 http.end();
+                xSemaphoreGive(httpMutex);
+                }
             }
         }
         vTaskDelay(pdMS_TO_TICKS(3000));
@@ -247,6 +263,8 @@ void handleClient() {
             statusCharacteristic->setValue("connecting");
             statusCharacteristic->notify();
         }
+        BLEDevice::deinit(true);
+        delay(500);
         initWiFi();
     }
 }

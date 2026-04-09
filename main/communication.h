@@ -1,6 +1,7 @@
 #ifndef communication_h
 #define communication_h
-
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 // Data structures
 struct AmbientTempData{
     float temperature;
@@ -19,6 +20,7 @@ struct HeartData{
 struct HumanTempData{
     float temperature;
 };
+extern SemaphoreHandle_t httpMutex;
 
 // Public API
 void Communication_init();
