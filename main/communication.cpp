@@ -7,6 +7,7 @@
 #include "freertos/semphr.h"
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
 
 //Semaphore
 static SemaphoreHandle_t dataMutex = NULL;
@@ -64,10 +65,8 @@ void Communication_init() {
     httpMutex = xSemaphoreCreateMutex();
     // Load saved credentials from flash
     preferences.begin("wifi", false);
-    // preferences.clear();
     wifiSSID = preferences.getString("ssid", "");
     wifiPassword = preferences.getString("password", "");
-    
     preferences.end();
     
     // If we have saved credentials, try to connect
@@ -79,7 +78,6 @@ void Communication_init() {
             initBLE();
         }
     } else {
-        // No saved credentials, start BLE
         initBLE();
     }
 }
@@ -117,13 +115,13 @@ static void initBLE() {
 }
 
 static void initWiFi() {
-     BLEDevice::deinit(true);
+    BLEDevice::deinit(true);
     delay(500);
     
-    WiFi.mode(WIFI_STA);  // explicitly set mode
+    WiFi.mode(WIFI_STA); 
     delay(100);
-        Serial.printf("Attempting WiFi with SSID: '%s' (len:%d) Pass: '%s' (len:%d)\n",wifiSSID.c_str(), wifiSSID.length(),
-        wifiPassword.c_str(), wifiPassword.length());
+    Serial.printf("Attempting WiFi with SSID: '%s' (len:%d) Pass: '%s' (len:%d)\n",wifiSSID.c_str(), wifiSSID.length(),
+    wifiPassword.c_str(), wifiPassword.length());
     WiFi.begin(wifiSSID.c_str(), wifiPassword.c_str());
  
     
@@ -151,7 +149,6 @@ static void initWiFi() {
             statusCharacteristic->notify();
         }
         
-        // Stop BLE to save resources
         BLEDevice::deinit(true);
         
         if (postDataHandle == NULL) {

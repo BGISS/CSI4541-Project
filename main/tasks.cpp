@@ -1,6 +1,5 @@
 #include "tasks.h"
 #include "communication.h"
-#include <DHT11.h>
 #include <Wire.h>
 #include "MAX30105.h"
 #include "heartRate.h"
@@ -11,6 +10,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <WiFiClientSecure.h>
+#include <DHT.h>
 
 //Thresholds
 volatile float MAX_BODY_TEMP_VAL = 38.0;
@@ -24,26 +24,27 @@ TaskHandle_t MPU6050Handle = NULL;
 TaskHandle_t MAX30102Handle = NULL;
 TaskHandle_t MAX30205Handle = NULL;
 TaskHandle_t MLX90614Handle = NULL;
+TaskHandle_t SPO2Handle = NULL;
 
 //Buzzer
 int buzzer = 26;
 int buzzingTime = 100;
 
 //MPU6050 Params
-const int MPU_addr=0x68;  // I2C address of the MPU-6050
+const int MPU_addr=0x68; 
 int16_t AcX,AcY,AcZ,Tmp,GyX,GyY,GyZ;
 
 //DHT11 Params
-#define DHT_SENSOR_TYPE DHT_TYPE_11
+#define DHT_SENSOR_TYPE DHT11
 static const int DHT_SENSOR_PIN = 25;
-DHT_nonblocking dht_sensor( DHT_SENSOR_PIN, DHT_SENSOR_TYPE );
+DHT dht( DHT_SENSOR_PIN, DHT_SENSOR_TYPE );
 
 //MAX30102 Params
 MAX30105 particleSensor;
 #define SPO2_BUFFER_LENGTH 100
 static uint32_t irBuffer [SPO2_BUFFER_LENGTH];
 static uint32_t redBuffer[SPO2_BUFFER_LENGTH];
-const unsigned long COLLECTION_PERIOD_MS = 5000; // Collect data for 5 seconds
+const unsigned long COLLECTION_PERIOD_MS = 5000;
 const int MAX_BEATS = 20;
 
 struct BeatRecord {
@@ -61,20 +62,17 @@ Adafruit_MLX90614 mlx = Adafruit_MLX90614();
 
 //Strucs for wifi communication
 AmbientTempData currentAmbientTemp;
-PositionData    currentPosition;
-HeartData       currentHeart;
+PositionData  currentPosition;
+HeartData  currentHeart;
 HumanTempData currentHuman;
 
 //Semaphore for I2C
 SemaphoreHandle_t wireMutex = NULL;
 #include <Wire.h>
 
-#define SDA_PIN 21 
-#define SCL_PIN 22
-
+ // Create tasks and store handles
 void CreateAllTasks() {
   wireMutex = xSemaphoreCreateMutex();
-  // Create tasks and store handles
   Wire.begin(21,22);
   pinMode(buzzer,OUTPUT);
   Wire.beginTransmission(MPU_addr);
@@ -82,7 +80,7 @@ void CreateAllTasks() {
   Wire.write(0);     
   Wire.endTransmission(true);
 
-  // Initialize MLX90614
+  dht.begin();
   if (!mlx.begin()) {
     Serial.println("Error connecting to MLX90614 sensor. Check wiring.");
   } else {
@@ -99,34 +97,34 @@ void CreateAllTasks() {
     }
     Wire.setClock(100000);
 
-
   xTaskCreatePinnedToCore(DHT11Task, "DHT11", 4096, NULL, 2, &DHT11Handle, 1);
   xTaskCreatePinnedToCore(MPU6050Task, "MPU6050", 4096, NULL, 2, &MPU6050Handle, 1);
-  xTaskCreatePinnedToCore(MAX30102Task, "MAX30102", 16384, NULL, 2, &MAX30102Handle, 1);
-  // xTaskCreatePinnedToCore(MLX90614Task, "MLX90614", 4096, NULL, 2, &MLX90614Handle, 1);
+  xTaskCreatePinnedToCore(MLX90614Task, "MLX90614", 4096, NULL, 2, &MLX90614Handle, 1);
   xTaskCreatePinnedToCore(ThresholdSyncTask, "ThresholdSync", 16384, NULL, 1, NULL, 0);  
-
+  xTaskCreatePinnedToCore(MAX30102Task, "SPO2", 16384, NULL, 2, &SPO2Handle, 1);
 }
 
 void DHT11Task(void *pvParameters){
   Serial.println("DHT11 Started");
-  float temperature;
-  float humidity;
   /* Measure temperature and humidity.  If the functions returns
      true, then a measurement is available. */
-  for(;;){
-    if( dht_sensor.measure( &temperature, &humidity ) == true )
-    {
+    for (;;) {
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+
+    if (!isnan(temperature) && !isnan(humidity)) {
       currentAmbientTemp.temperature = temperature;
       currentAmbientTemp.humidity = humidity;
       updateAmbientTempData(currentAmbientTemp);
-      Serial.print("DHT11: Got reading - Temp: ");
+      Serial.print("Ambient Temperature: ");
       Serial.print(temperature);
       Serial.print("°C, Humidity: ");
       Serial.print(humidity);
       Serial.println("%");
+    } else {
+      Serial.println("DHT11: Failed to read");
     }
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(2000)); 
   }
 }
 
@@ -143,100 +141,85 @@ void MPU6050Task(void *pvParameters){
       AcY=Wire.read()<<8|Wire.read(); 
       AcZ=Wire.read()<<8|Wire.read();  
       for (int i = 0; i < 8; i++) Wire.read();
-
+      
       xSemaphoreGive(wireMutex);
       currentPosition.AcX = (AcX / 16384.0) * 9.81;
       currentPosition.AcY = (AcY / 16384.0) * 9.81;
       currentPosition.AcZ = (AcZ / 16384.0) * 9.81;
       updatePositionData(currentPosition);
+      Serial.print("AcX: ");
+      Serial.print(currentPosition.AcX);
+      Serial.print("m/s^2 ");
+      Serial.print("AcY: ");
+      Serial.print(currentPosition.AcY);
+      Serial.print("m/s^2 ");
+      Serial.print("AcZ: ");
+      Serial.print(currentPosition.AcZ);
+      Serial.println("m/s^2");
      
     }
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
-void MAX30102Task(void *pvParameters){
-  for(;;){
-   long irValue = 0;
-    // Try to get I2C access
-    if (xSemaphoreTake(wireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        irValue = particleSensor.getIR();
-        particleSensor.nextSample(); 
-      xSemaphoreGive(wireMutex);
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(10));
+void MAX30102Task(void *pvParameters) {
+  int32_t spo2 = 0;
+  int8_t  validSPO2 = 0;
+  int32_t heartRate = 0;
+  int8_t  validHeartRate = 0;
+
+  for (;;) {
+    for (int i = 0; i < SPO2_BUFFER_LENGTH; i++) {
+      while (!particleSensor.available()) {
+        if (xSemaphoreTake(wireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+          particleSensor.check();
+          xSemaphoreGive(wireMutex);
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+      }
+
+      if (xSemaphoreTake(wireMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        redBuffer[i] = particleSensor.getRed();
+        irBuffer[i]  = particleSensor.getIR();
+        particleSensor.nextSample();
+        xSemaphoreGive(wireMutex);
+      }
+    }
+
+    if (irBuffer[SPO2_BUFFER_LENGTH - 1] < 50000) {
+      Serial.println("SPO2: No finger detected");
+      vTaskDelay(pdMS_TO_TICKS(2000));
       continue;
     }
 
-    if (irValue < 50000) {
-      static unsigned long lastNoFingerWarning = 0;
-      if (millis() - lastNoFingerWarning > 2000) {
-        Serial.println("No finger detected");
-        lastNoFingerWarning = millis();
-      }
-      
-      // Reset all heart rate data
-      beatCount = 0;
-      beatsPerMinute = 0;
-      currentHeart.heartBeat = 0;
-      updateHeartData(currentHeart);
-      periodStartTime = millis(); // Reset collection period
-      
-      vTaskDelay(pdMS_TO_TICKS(100)); // Wait a bit longer when no finger
-      continue; // Skip rest of processing
+    maxim_heart_rate_and_oxygen_saturation(
+      irBuffer, SPO2_BUFFER_LENGTH,
+      redBuffer,
+      &spo2, &validSPO2,
+      &heartRate, &validHeartRate
+    );
+
+    if (validSPO2 && spo2 > 0) {
+      Serial.print("SPO2: ");
+      Serial.print(spo2);
+      Serial.println("%");
+      currentHeart.spO2 = spo2;
+    } else {
+      Serial.println("SPO2: Invalid reading");
     }
 
-    // Only process beats if finger is detected (irValue >= 50000)
-    if (checkForBeat(irValue) == true)
-    {
-      long delta = millis() - lastBeat;
-      lastBeat = millis();
-
-      beatsPerMinute = 60 / (delta / 1000.0);
-
-      // Only accept reasonable heart rates
-      if (beatsPerMinute < 200 && beatsPerMinute > 40)
-      {
-        // Store beat in current collection period
-        if (beatCount < MAX_BEATS) {
-          beatHistory[beatCount].bpm = (byte)beatsPerMinute;
-          beatCount++;
-        }
-      }
+    if (validHeartRate && heartRate > 0) {
+      Serial.print("Heartrate: ");
+      Serial.print(heartRate);
+      Serial.println(" BPM");
+      currentHeart.heartBeat = heartRate;
     }
-    // Check if collection period is over
-    if (millis() - periodStartTime >= COLLECTION_PERIOD_MS)
-    {
-      // Calculate and print average
-      if (beatCount > 0) {
-        int sum = 0;
-        for (int i = 0; i < beatCount; i++) {
-          sum += beatHistory[i].bpm;
-        }
-        int avgBPM = sum / beatCount;
-        
-        Serial.print("Average BPM (");
-        Serial.print(beatCount);
-        Serial.print(" beats): ");
-        Serial.println(avgBPM);
-        if(avgBPM < MIN_HEARTBEAT_VAL || avgBPM > MAX_HEARTBEAT_VAL){
-          startBuzzer();
-        }
-        currentHeart.heartBeat = avgBPM;
-        updateHeartData(currentHeart);
-        
-      } else {
-        Serial.println("No beats detected in this period");
-        currentHeart.heartBeat = 0;
-        updateHeartData(currentHeart);
-      }
-      
-      // Reset for next period
-      beatCount = 0;
-      periodStartTime = millis();
-    }
-    vTaskDelay(pdMS_TO_TICKS(20));
-  } 
+    if(heartRate < MIN_HEARTBEAT_VAL || heartRate > MAX_HEARTBEAT_VAL){
+      startBuzzer();
+    }    
+    updateHeartData(currentHeart);
+    vTaskDelay(pdMS_TO_TICKS(5000));
+  }
 }
 
 void MLX90614Task(void *pvParameters) {
@@ -249,7 +232,6 @@ void MLX90614Task(void *pvParameters) {
         amb = mlx.readAmbientTempC();
         xSemaphoreGive(wireMutex);
       }
-      
       Serial.print("MLX90614 - Ambient: "); 
       Serial.print(amb);
       Serial.print("°C\tObject: "); 
@@ -260,7 +242,7 @@ void MLX90614Task(void *pvParameters) {
       updateHumanTempData(currentHuman);
       
       if (obj < MIN_BODY_TEMP_VAL || obj > MAX_BODY_TEMP_VAL) {
-        // startBuzzer();
+        startBuzzer();
       }
       
       vTaskDelay(pdMS_TO_TICKS(5000));
@@ -269,7 +251,6 @@ void MLX90614Task(void *pvParameters) {
  
 void startBuzzer(){
   tone(26, NOTE_C5, 3000);
-  // restart after two seconds 
   delay(2000);
 }
 
